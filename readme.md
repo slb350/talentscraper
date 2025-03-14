@@ -80,5 +80,5 @@ It's recommended to run the Python script whenever:
 - Try `/reload` to reload the UI if the addon isn't working
 - Use `/ts debug` to view debugging information
 
-### Different Difficulties:
+## Different Difficulties:
 The addon supports Normal, Heroic, and Mythic difficulties, selectable from the dropdown in the UI.
