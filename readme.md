@@ -80,10 +80,5 @@ It's recommended to run the Python script whenever:
 - Try `/reload` to reload the UI if the addon isn't working
 - Use `/ts debug` to view debugging information
 
-## Customization
-
-### Updating Boss IDs:
-When a new raid is released, you'll need to update the `boss_mappings` dictionary in the Python script and the `ns.Data.bossIDs` table in the Lua files with the new encounter IDs.
-
 ### Different Difficulties:
 The addon supports Normal, Heroic, and Mythic difficulties, selectable from the dropdown in the UI.
