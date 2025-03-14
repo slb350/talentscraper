@@ -6,9 +6,13 @@ import time
 import random
 from datetime import datetime
 from bs4 import BeautifulSoup
+import concurrent.futures
+from tqdm import tqdm
 
 # Configuration
 OUTPUT_PATH = "TalentData.lua"
+MAX_WORKERS = 10  # Adjust based on your system and to avoid rate limiting
+RATE_LIMIT_DELAY = (0.5, 1.5)  # Random delay range in seconds
 
 # Boss mappings (WoW encounter ID to Archon.gg URL slug)
 BOSS_MAPPINGS = {
@@ -113,189 +117,69 @@ def extract_talent_code_from_page(html_content):
     
     return None
 
-def get_available_builds():
-    """Get a list of available builds from Archon.gg"""
-    available_builds = []
-    
-    # For each class and spec, check which bosses and difficulties have data
-    for class_name, specs in CLASS_SPECS.items():
-        for spec_id, spec_slug in specs.items():
-            # For Archon.gg, class name is lowercase and URL uses spec slug first
-            main_url = f"https://www.archon.gg/wow/builds/{spec_slug}/{class_name.lower()}/raid/talents"
-            
-            print(f"Checking available builds for {class_name} {spec_slug}...")
-            
-            try:
-                response = requests.get(main_url, headers=HEADERS)
-                
-                # If the page doesn't exist, continue to the next spec
-                if response.status_code == 404:
-                    print(f"No raid talent builds found for {class_name} {spec_slug}")
-                    continue
-                    
-                response.raise_for_status()
-                
-                # Parse the HTML
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Look for links that match boss pages
-                # In Archon.gg's structure, they usually have links to specific boss builds
-                links = soup.find_all('a', href=True)
-                
-                # Check each link to see if it's a boss page
-                for link in links:
-                    href = link['href']
-                    
-                    # Look for links that match the pattern for boss talent builds
-                    for difficulty in DIFFICULTIES:
-                        for boss_slug in BOSS_MAPPINGS.values():
-                            # Check if this is a link to a specific boss build
-                            pattern = f"/wow/builds/{spec_slug}/{class_name.lower()}/raid/talents/{difficulty}/{boss_slug}"
-                            if pattern in href:
-                                boss_id = BOSS_SLUG_TO_ID[boss_slug]
-                                available_builds.append({
-                                    "class_name": class_name,
-                                    "spec_id": spec_id,
-                                    "spec_slug": spec_slug,
-                                    "difficulty": difficulty,
-                                    "boss_id": boss_id,
-                                    "boss_slug": boss_slug,
-                                    "url": f"https://www.archon.gg{href}"
-                                })
-                                print(f"Found build: {class_name} {spec_slug} - {difficulty} {boss_slug}")
-                
-                # If no specific boss links are found, check if there's a general recommended build
-                if not any(build['class_name'] == class_name and build['spec_id'] == spec_id for build in available_builds):
-                    # If there's talent data on this page, add it as a general build
-                    if extract_talent_code_from_page(response.text):
-                        # Use the first boss as a placeholder (typically Gallywix as it's often the main boss)
-                        boss_slug = "gallywix"
-                        boss_id = BOSS_SLUG_TO_ID[boss_slug]
-                        available_builds.append({
-                            "class_name": class_name,
-                            "spec_id": spec_id,
-                            "spec_slug": spec_slug,
-                            "difficulty": "normal",  # Default to normal difficulty
-                            "boss_id": boss_id,
-                            "boss_slug": boss_slug,
-                            "url": main_url
-                        })
-                        print(f"Found general build for {class_name} {spec_slug}")
-            
-            except requests.exceptions.RequestException as e:
-                print(f"Error checking {main_url}: {e}")
-            
-            # Be polite to the server
-            time.sleep(1)
-    
-    return available_builds
+def format_class_name(class_name):
+    """Format class name for URL (lowercase and hyphenated if needed)"""
+    formatted = class_name.lower()
+    if formatted == "deathknight":
+        return "death-knight"
+    elif formatted == "demonhunter":
+        return "demon-hunter"
+    return formatted
 
-def scrape_talent_data():
-    """Scrape talent data from Archon.gg for available builds"""
-    talent_data = {}
+def fetch_build(combo):
+    """Fetch a single build based on the combo parameters"""
+    url = f"https://www.archon.gg/wow/builds/{combo['spec_slug']}/{combo['formatted_class']}/raid/talents/{combo['difficulty']}/{combo['boss_slug']}"
     
-    # First, get a list of available builds
-    available_builds = get_available_builds()
-    
-    if not available_builds:
-        print("No builds found to scrape!")
-        # Try direct scraping for some common builds
-        return try_direct_scraping()
-    
-    print(f"Found {len(available_builds)} available builds to scrape")
-    
-    # Now, scrape each available build
-    for build in available_builds:
-        class_name = build["class_name"]
-        spec_id = build["spec_id"]
-        difficulty = build["difficulty"]
-        boss_id = build["boss_id"]
-        boss_slug = build["boss_slug"]
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
         
-        # Use the URL from the build if available, otherwise construct it
-        url = build.get("url")
-        if not url:
-            url = f"https://www.archon.gg/wow/builds/{build['spec_slug']}/{class_name.lower()}/raid/talents/{difficulty}/{boss_slug}"
-        
-        print(f"Scraping {class_name} {spec_id} for {boss_slug} ({difficulty})...")
-        
-        try:
-            response = requests.get(url, headers=HEADERS)
-            response.raise_for_status()
+        # Skip if page doesn't exist
+        if response.status_code == 404:
+            return None
             
-            # Extract talent code using the new function
-            talent_code = extract_talent_code_from_page(response.text)
-            
-            if talent_code:
-                # Initialize the data structure if needed
-                if boss_id not in talent_data:
-                    talent_data[boss_id] = {}
-                if class_name not in talent_data[boss_id]:
-                    talent_data[boss_id][class_name] = {}
-                
-                # Store the talent information
-                talent_data[boss_id][class_name][spec_id] = {
-                    "title": f"{difficulty.capitalize()} {BOSS_NAMES.get(boss_id, boss_slug.capitalize())}",
+        response.raise_for_status()
+        
+        # Extract talent code
+        talent_code = extract_talent_code_from_page(response.text)
+        
+        if talent_code:
+            # Return the talent information
+            return {
+                "boss_id": combo['boss_id'],
+                "class_name": combo['class_name'],
+                "spec_id": combo['spec_id'],
+                "data": {
+                    "title": f"{combo['difficulty'].capitalize()} {BOSS_NAMES.get(combo['boss_id'], combo['boss_slug'].capitalize())}",
                     "talents": talent_code,
                     "popularity": "N/A",
-                    "source": f"Archon.gg ({difficulty.capitalize()})"
+                    "source": f"Archon.gg ({combo['difficulty'].capitalize()})"
                 }
-                
-                print(f"Found talent code: {talent_code[:30]}...")
-            else:
-                print(f"No talent code found on the page")
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Error scraping {url}: {e}")
-        
-        # Be polite to the server
-        time.sleep(1)
+            }
     
-    return talent_data
+    except requests.exceptions.RequestException:
+        pass
+        
+    # Be polite to the server - use a variable delay to avoid being blocked
+    delay = RATE_LIMIT_DELAY[0] + ((RATE_LIMIT_DELAY[1] - RATE_LIMIT_DELAY[0]) * random.random())
+    time.sleep(delay)
+    
+    return None
 
-def try_direct_scraping():
-    """Try direct scraping for all classes/specs/bosses and difficulties"""
+def parallel_scrape():
+    """Scrape talent data in parallel"""
     talent_data = {}
     
-    # Update boss mappings with correct slugs
-    updated_boss_mappings = {
-        3009: "vexie",
-        3010: "cauldron-of-carnage", 
-        3011: "rik-reverb",
-        3012: "stix-bunkjunker",
-        3013: "lockenstock",
-        3014: "one-armed-bandit",
-        3015: "mugzee",
-        3016: "gallywix"
-    }
-    
-    # All difficulties to try
-    difficulties = ["normal", "heroic", "mythic"]
-    
-    # Instead of trying all combinations, let's focus on known working patterns
-    # based on the screenshot showing a Blood Death Knight page
-    
-    print("Attempting targeted scraping based on known working patterns...")
-    
-    # List of specific combinations to try
-    targeted_combinations = []
+    # Generate all combinations to try
+    combinations = []
     
     # Add all class/spec combinations
     for class_name, specs in CLASS_SPECS.items():
+        formatted_class = format_class_name(class_name)
         for spec_id, spec_slug in specs.items():
-            # The URL format appears to be different than we thought
-            # For example: https://www.archon.gg/wow/builds/blood/death-knight/raid/talents/normal/vexie
-            # Class name needs to be converted to lowercase and hyphenated if needed
-            formatted_class = class_name.lower()
-            if formatted_class == "deathknight":
-                formatted_class = "death-knight"
-            elif formatted_class == "demonhunter":
-                formatted_class = "demon-hunter"
-            
             # For each boss and difficulty
-            for boss_id, boss_slug in updated_boss_mappings.items():
-                for difficulty in difficulties:
-                    targeted_combinations.append({
+            for boss_id, boss_slug in BOSS_MAPPINGS.items():
+                for difficulty in DIFFICULTIES:
+                    combinations.append({
                         "class_name": class_name,
                         "formatted_class": formatted_class,
                         "spec_id": spec_id,
@@ -305,78 +189,49 @@ def try_direct_scraping():
                         "difficulty": difficulty
                     })
     
-    total_attempts = len(targeted_combinations)
-    current_attempt = 0
+    total_builds = len(combinations)
+    print(f"Attempting to scrape {total_builds} talent builds in parallel...")
+    
+    # Use a ThreadPoolExecutor to run the scraping in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Map the fetch_build function to combinations with progress tracking
+        results = list(tqdm(
+            executor.map(fetch_build, combinations),
+            total=total_builds,
+            desc="Scraping talent builds",
+            unit="build"
+        ))
+    
+    # Process results
     successful_scrapes = 0
-    
-    print(f"Will attempt {total_attempts} targeted combinations...")
-    
-    # Try each combination
-    for combo in targeted_combinations:
-        current_attempt += 1
-        
-        # Correctly format the URL based on the screenshot
-        # Format: https://www.archon.gg/wow/builds/{spec_slug}/{formatted_class}/raid/talents/{difficulty}/{boss_slug}
-        url = f"https://www.archon.gg/wow/builds/{combo['spec_slug']}/{combo['formatted_class']}/raid/talents/{combo['difficulty']}/{combo['boss_slug']}"
-        
-        # Display progress periodically
-        if current_attempt % 10 == 0 or current_attempt == 1:
-            progress = (current_attempt / total_attempts) * 100
-            print(f"Progress: {progress:.1f}% ({current_attempt}/{total_attempts}), Success rate: {successful_scrapes}/{current_attempt}")
-        
-        print(f"Scraping {combo['class_name']} {combo['spec_slug']} - {combo['difficulty']} {combo['boss_slug']}...", end="", flush=True)
-        
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
+    for result in results:
+        if result:
+            # Extract data
+            boss_id = result['boss_id']
+            class_name = result['class_name']
+            spec_id = result['spec_id']
+            spec_data = result['data']
             
-            # Skip if page doesn't exist
-            if response.status_code == 404:
-                print(" Not found")
-                continue
-                
-            response.raise_for_status()
+            # Initialize the data structure if needed
+            if boss_id not in talent_data:
+                talent_data[boss_id] = {}
+            if class_name not in talent_data[boss_id]:
+                talent_data[boss_id][class_name] = {}
             
-            # Extract talent code
-            talent_code = extract_talent_code_from_page(response.text)
-            
-            if talent_code:
-                # Initialize the data structure if needed
-                boss_id = combo['boss_id']
-                class_name = combo['class_name']
-                spec_id = combo['spec_id']
-                
-                if boss_id not in talent_data:
-                    talent_data[boss_id] = {}
-                if class_name not in talent_data[boss_id]:
-                    talent_data[boss_id][class_name] = {}
-                
-                # Store the talent information
-                talent_data[boss_id][class_name][spec_id] = {
-                    "title": f"{combo['difficulty'].capitalize()} {BOSS_NAMES.get(boss_id, combo['boss_slug'].capitalize())}",
-                    "talents": talent_code,
-                    "popularity": "N/A",
-                    "source": f"Archon.gg ({combo['difficulty'].capitalize()})"
-                }
-                
-                print(f" Success! Talent code: {talent_code[:20]}...")
-                successful_scrapes += 1
-            else:
-                print(" No talent code found")
-        
-        except requests.exceptions.RequestException as e:
-            print(f" Error: {str(e)[:50]}...")
-        
-        # Be polite to the server - use a variable delay to avoid being blocked
-        delay = 1.0 + (0.5 * random.random())  # Between 1.0 and 1.5 seconds
-        time.sleep(delay)
+            # Store the talent information
+            talent_data[boss_id][class_name][spec_id] = spec_data
+            successful_scrapes += 1
     
-    print(f"Scraping complete! Successfully scraped {successful_scrapes} out of {total_attempts} attempted combinations")
+    print(f"Scraping complete! Successfully scraped {successful_scrapes} out of {total_builds} attempted combinations")
     return talent_data
 
 def generate_lua_file(talent_data, output_path):
     """Generate a Lua file with the talent data for the addon"""
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # Check if output path has a directory component
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
     
     with open(output_path, "w") as f:
         # Write header
@@ -430,12 +285,11 @@ def generate_lua_file(talent_data, output_path):
             print("WARNING: No talent data was written to the Lua file!")
 
 def main():
-    print("Archon.gg Talent Scraper")
-    print("------------------------")
+    print("Archon.gg Parallel Talent Scraper")
+    print("--------------------------------")
     
-    # Skip the regular scraping approach and go directly to comprehensive direct scraping
-    print("Performing comprehensive direct scraping for all class/spec/boss/difficulty combinations...")
-    talent_data = try_direct_scraping()
+    # Perform parallel scraping
+    talent_data = parallel_scrape()
     
     # Generate Lua file
     print("Generating Lua file...")
