@@ -1,0 +1,12 @@
+## Interface: 100200
+## Title: TalentScraper
+## Notes: Displays popular talent builds for boss encounters from Archon.gg
+## Author: Stephen Brandon
+## Version: 1.0.0
+## SavedVariables: TalentScraperDB
+## X-Category: Interface
+## X-Website: https://github.com/slb350/talentscraper
+# Load the main addon file first
+TalentScraper.lua
+TalentScraperUI.lua
+TalentData.lua
